@@ -13,32 +13,36 @@ local Section = Tab:NewSection("CFrame Speed")
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 local Character = nil
 local HumanoidRootPart = nil
 
 local enabled = false
-local speed = 1
-local moveConnection = nil
+local baseSpeed = 1
+local moveLoopCoroutine = nil
+local lastToggleTime = 0
+local toggleCooldown = 0.3 -- 300ms cooldown between toggles
 
--- Utility: Random jitter [-0.05 .. 0.05]
-local function randomJitter()
-    return (math.random() - 0.5) / 10
+-- Smooth noise generator (Perlin-like) for jitter, oscillates between -1 and 1
+local noiseTime = 0
+local function smoothNoise(freq)
+    noiseTime = noiseTime + freq
+    return math.sin(noiseTime) * math.cos(noiseTime*1.5)
 end
 
-local function safeFireServer(scriptObj)
-    pcall(function()
-        local fire = scriptObj and scriptObj:FindFirstChild("LocalScript")
-        if fire then
-            for _=1, math.random(1,2) do
-                pcall(function()
-                    fire:FireServer()
-                end)
-                task.wait(math.random(50,150)/1000)
+local function isNearOtherPlayers()
+    if not Character or not HumanoidRootPart then return false end
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            local dist = (HumanoidRootPart.Position - player.Character.HumanoidRootPart.Position).Magnitude
+            if dist < 20 then
+                return true
             end
         end
-    end)
+    end
+    return false
 end
 
 local function cleanUpScripts()
@@ -57,25 +61,65 @@ local function onCharacterAdded(char)
 
     char.ChildAdded:Connect(function(child)
         if child:IsA("Script") and child:FindFirstChild("LocalScript") then
-            task.wait(0.1 + math.random() / 5) -- random delay
-            safeFireServer(child)
+            task.wait(0.1 + math.random() / 5)
+            pcall(function()
+                child.LocalScript:FireServer()
+            end)
         end
     end)
 end
 
+local function tweenMoveTo(newCFrame)
+    local tweenInfo = TweenInfo.new(
+        0.1 + math.random() * 0.05,
+        Enum.EasingStyle.Linear
+    )
+    local tween = TweenService:Create(HumanoidRootPart, tweenInfo, {CFrame = newCFrame})
+    tween:Play()
+end
+
 local function moveLoop()
+    local pauseFrames = 0
+    local verticalOscillation = 0
     while enabled and HumanoidRootPart and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") do
+        if pauseFrames > 0 then
+            pauseFrames = pauseFrames - 1
+            RunService.Stepped:Wait()
+            continue
+        end
+
         local moveDir = LocalPlayer.Character.Humanoid.MoveDirection
         if moveDir.Magnitude > 0 then
-            local offset = moveDir * speed
-            -- add jitter on each axis
-            offset = offset + Vector3.new(randomJitter(), 0, randomJitter())
-            pcall(function()
-                HumanoidRootPart.CFrame = HumanoidRootPart.CFrame + offset
-            end)
+            local speedMultiplier = baseSpeed
+            if isNearOtherPlayers() then
+                speedMultiplier = math.clamp(baseSpeed * 0.4, 0.2, 2)
+            end
+
+            -- Smooth jitter that oscillates over time
+            local jitterX = smoothNoise(0.15) * (speedMultiplier / 30)
+            local jitterZ = smoothNoise(0.22) * (speedMultiplier / 30)
+
+            -- Vertical bobbing to simulate natural movement sway
+            verticalOscillation = verticalOscillation + 0.1
+            local verticalOffset = math.sin(verticalOscillation) * 0.015
+
+            local offset = moveDir * speedMultiplier + Vector3.new(jitterX, verticalOffset, jitterZ)
+            local targetCFrame = HumanoidRootPart.CFrame + offset
+            tweenMoveTo(targetCFrame)
         end
-        RunService.Stepped:Wait()
-        task.wait(0.01 + math.random() / 100) -- small random throttle delay
+
+        -- Occasionally pause for 1-3 frames (random micro-pauses)
+        if math.random() < 0.06 then
+            pauseFrames = math.random(1,3)
+        end
+
+        -- Random frame skip between 2-5 frames
+        local skipFrames = math.random(2,5)
+        for _=1, skipFrames do
+            RunService.Stepped:Wait()
+        end
+
+        task.wait(math.clamp(0.015 + math.random() / 150, 0.015, 0.03))
     end
 end
 
@@ -86,39 +130,53 @@ Section:NewButton("CFrame Guns FIX", "Fix local scripts that can get you detecte
     LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
 end)
 
-Section:NewButton("Toggle CFrame Speed (F)", "Toggle stealth speed mode (randomized)", function()
+Section:NewButton("Toggle CFrame Speed (C)", "Toggle stealth speed mode (randomized, adaptive)", function()
     if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
         LocalPlayer.CharacterAdded:Wait()
     end
     Character = LocalPlayer.Character
     HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
 
-    local toggleKey = Enum.KeyCode.F -- stealth toggle key
+    local toggleKey = Enum.KeyCode.C
 
-    UserInputService.InputBegan:Connect(function(input, gpe)
+    if _G._inputConn then
+        _G._inputConn:Disconnect()
+    end
+
+    _G._inputConn = UserInputService.InputBegan:Connect(function(input, gpe)
         if gpe then return end
+
         if input.KeyCode == toggleKey then
-            enabled = not enabled
-            if enabled then
-                coroutine.wrap(moveLoop)()
+            local now = tick()
+            if now - lastToggleTime < toggleCooldown then
+                return -- ignore toggles during cooldown
             end
+            lastToggleTime = now
+
+            task.delay(math.random(1,3)/10, function()
+                enabled = not enabled
+                if enabled then
+                    if moveLoopCoroutine and coroutine.status(moveLoopCoroutine) ~= "dead" then return end
+                    moveLoopCoroutine = coroutine.create(moveLoop)
+                    coroutine.resume(moveLoopCoroutine)
+                end
+            end)
         elseif input.KeyCode == Enum.KeyCode.LeftBracket then
-            speed = math.clamp(speed - 0.05, 0.2, 3)
+            baseSpeed = math.clamp(baseSpeed - 0.05, 0.2, 5)
         elseif input.KeyCode == Enum.KeyCode.RightBracket then
-            speed = math.clamp(speed + 0.05, 0.2, 3)
+            baseSpeed = math.clamp(baseSpeed + 0.05, 0.2, 5)
         end
     end)
 end)
 
-Section:NewSlider("Speed Multiplier", "Speed from 0.2 (slow) to 3 (fast)", 3, 0.2, function(val)
-    speed = val
+Section:NewSlider("Speed Multiplier", "Speed from 0.2 (slow) to 5 (fast)", 5, 0.2, function(val)
+    baseSpeed = val
 end)
 
 Section:NewKeybind("Toggle UI", "Toggle the UI (default V)", Enum.KeyCode.V, function()
     Library.ToggleUI()
 end)
 
--- Initialize on player character spawn
 if LocalPlayer.Character then
     onCharacterAdded(LocalPlayer.Character)
 else
