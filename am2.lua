@@ -23,13 +23,18 @@ local enabled = false
 local baseSpeed = 1
 local moveLoopCoroutine = nil
 local lastToggleTime = 0
-local toggleCooldown = 0.3 -- 300ms cooldown between toggles
+local toggleCooldown = 0.3 -- 300ms cooldown
 
--- Smooth noise generator (Perlin-like) for jitter, oscillates between -1 and 1
+-- Smooth oscillation generator for jitter
 local noiseTime = 0
 local function smoothNoise(freq)
     noiseTime = noiseTime + freq
-    return math.sin(noiseTime) * math.cos(noiseTime*1.5)
+    return math.sin(noiseTime) * math.cos(noiseTime * 1.5)
+end
+
+-- Random tiny speed fluctuations for stealth
+local function randomSpeedFluctuation()
+    return 1 + (math.sin(tick() * math.random(3,6)) * 0.05) + (math.cos(tick() * math.random(2,5)) * 0.03)
 end
 
 local function isNearOtherPlayers()
@@ -70,8 +75,9 @@ local function onCharacterAdded(char)
 end
 
 local function tweenMoveTo(newCFrame)
+    local tweenTime = 0.035 + math.random() * 0.03 -- Random tween duration 35-65ms for unpredictability
     local tweenInfo = TweenInfo.new(
-        0.1 + math.random() * 0.05,
+        tweenTime,
         Enum.EasingStyle.Linear
     )
     local tween = TweenService:Create(HumanoidRootPart, tweenInfo, {CFrame = newCFrame})
@@ -79,47 +85,44 @@ local function tweenMoveTo(newCFrame)
 end
 
 local function moveLoop()
-    local pauseFrames = 0
     local verticalOscillation = 0
-    while enabled and HumanoidRootPart and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") do
-        if pauseFrames > 0 then
-            pauseFrames = pauseFrames - 1
-            RunService.Stepped:Wait()
-            continue
-        end
+    local microPauseTimer = tick() + math.random(5,10)
 
+    while enabled and HumanoidRootPart and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") do
         local moveDir = LocalPlayer.Character.Humanoid.MoveDirection
         if moveDir.Magnitude > 0 then
-            local speedMultiplier = baseSpeed
+            local speedMultiplier = baseSpeed * randomSpeedFluctuation()
+
             if isNearOtherPlayers() then
-                speedMultiplier = math.clamp(baseSpeed * 0.4, 0.2, 2)
+                speedMultiplier = math.clamp(baseSpeed * (0.35 + math.random() * 0.1), 0.2, 7) -- adaptive slowdown near players
             end
 
-            -- Smooth jitter that oscillates over time
-            local jitterX = smoothNoise(0.15) * (speedMultiplier / 30)
-            local jitterZ = smoothNoise(0.22) * (speedMultiplier / 30)
+            -- Slight jitter to mimic natural movement
+            local jitterX = smoothNoise(0.13) * (speedMultiplier / 45)
+            local jitterZ = smoothNoise(0.16) * (speedMultiplier / 45)
 
-            -- Vertical bobbing to simulate natural movement sway
-            verticalOscillation = verticalOscillation + 0.1
-            local verticalOffset = math.sin(verticalOscillation) * 0.015
+            verticalOscillation = verticalOscillation + 0.08
+            local verticalOffset = math.sin(verticalOscillation) * 0.01 + (math.cos(tick() * 6) * 0.002) -- slight double oscillation for naturalness
 
             local offset = moveDir * speedMultiplier + Vector3.new(jitterX, verticalOffset, jitterZ)
             local targetCFrame = HumanoidRootPart.CFrame + offset
+
             tweenMoveTo(targetCFrame)
         end
 
-        -- Occasionally pause for 1-3 frames (random micro-pauses)
-        if math.random() < 0.06 then
-            pauseFrames = math.random(1,3)
+        -- Occasional micro-pauses or speed drops to simulate hesitation
+        if tick() > microPauseTimer then
+            local pauseDuration = math.random(10, 30) / 1000 -- 10-30ms micro pause
+            task.wait(pauseDuration)
+            microPauseTimer = tick() + math.random(5, 10) -- reset timer
         end
 
-        -- Random frame skip between 2-5 frames
-        local skipFrames = math.random(2,5)
-        for _=1, skipFrames do
-            RunService.Stepped:Wait()
+        -- Randomly skip some frames for unpredictability
+        if math.random() < 0.02 then
+            task.wait(math.random(5,15) / 1000)
         end
 
-        task.wait(math.clamp(0.015 + math.random() / 150, 0.015, 0.03))
+        RunService.Heartbeat:Wait()
     end
 end
 
@@ -148,9 +151,7 @@ Section:NewButton("Toggle CFrame Speed (C)", "Toggle stealth speed mode (randomi
 
         if input.KeyCode == toggleKey then
             local now = tick()
-            if now - lastToggleTime < toggleCooldown then
-                return -- ignore toggles during cooldown
-            end
+            if now - lastToggleTime < toggleCooldown then return end
             lastToggleTime = now
 
             task.delay(math.random(1,3)/10, function()
@@ -162,14 +163,14 @@ Section:NewButton("Toggle CFrame Speed (C)", "Toggle stealth speed mode (randomi
                 end
             end)
         elseif input.KeyCode == Enum.KeyCode.LeftBracket then
-            baseSpeed = math.clamp(baseSpeed - 0.05, 0.2, 5)
+            baseSpeed = math.clamp(baseSpeed - 0.1, 0.2, 7)
         elseif input.KeyCode == Enum.KeyCode.RightBracket then
-            baseSpeed = math.clamp(baseSpeed + 0.05, 0.2, 5)
+            baseSpeed = math.clamp(baseSpeed + 0.1, 0.2, 7)
         end
     end)
 end)
 
-Section:NewSlider("Speed Multiplier", "Speed from 0.2 (slow) to 5 (fast)", 5, 0.2, function(val)
+Section:NewSlider("Speed Multiplier", "Speed from 0.2 (slow) to 7 (fast)", 7, 0.2, function(val)
     baseSpeed = val
 end)
 
